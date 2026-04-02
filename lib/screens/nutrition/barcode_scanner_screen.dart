@@ -24,10 +24,24 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    _initializeHistory();
+  }
+
+  @override
   void dispose() {
     _manualBarcodeController.dispose();
     _scannerController.dispose();
     super.dispose();
+  }
+
+  Future<void> _initializeHistory() async {
+    await _barcodeService.initialize();
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
   }
 
   @override
@@ -101,7 +115,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
                   final code = capture.barcodes
                       .map((barcode) => barcode.rawValue?.trim())
                       .firstWhere(
-                        (value) => value != null && value!.isNotEmpty,
+                        (value) => value != null && value.isNotEmpty,
                         orElse: () => null,
                       );
                   if (code != null) {

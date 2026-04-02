@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../data/workout_template_database.dart';
 import '../../models/exercise.dart';
 import '../../models/workout_template.dart';
@@ -16,6 +19,8 @@ class WorkoutTemplatesScreen extends StatefulWidget {
 
 class _WorkoutTemplatesScreenState extends State<WorkoutTemplatesScreen>
     with SingleTickerProviderStateMixin {
+  static const String _customTemplatesStorageKey = 'custom_workout_templates';
+
   late TabController _tabController;
   WorkoutCategory? _selectedCategory;
   DifficultyLevel? _selectedDifficulty;
@@ -28,6 +33,7 @@ class _WorkoutTemplatesScreenState extends State<WorkoutTemplatesScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _loadCustomTemplates();
   }
 
   @override
@@ -284,6 +290,9 @@ class _WorkoutTemplatesScreenState extends State<WorkoutTemplatesScreen>
                 return _TemplateCard(
                   template: template,
                   onTap: () => _showTemplateDetails(template),
+                  onManage: template.isCustom
+                      ? () => _showCustomTemplateActions(template)
+                      : null,
                 );
               }, childCount: _getFilteredTemplates().length),
             ),
@@ -456,6 +465,7 @@ class _WorkoutTemplatesScreenState extends State<WorkoutTemplatesScreen>
                 ),
               ).then((createdTemplate) {
                 if (createdTemplate is WorkoutTemplate && mounted) {
+                  _persistCustomTemplates();
                   setState(() {});
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -473,6 +483,217 @@ class _WorkoutTemplatesScreenState extends State<WorkoutTemplatesScreen>
         ],
       ),
     );
+  }
+
+  Future<void> _loadCustomTemplates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final customTemplatesJson =
+        prefs.getStringList(_customTemplatesStorageKey) ?? const [];
+
+    if (customTemplatesJson.isEmpty) {
+      return;
+    }
+
+    final existingIds = WorkoutTemplateDatabase.templates
+        .map((template) => template.id)
+        .toSet();
+
+    var inserted = false;
+    for (final item in customTemplatesJson) {
+      try {
+        final decoded = jsonDecode(item) as Map<String, dynamic>;
+        final template = WorkoutTemplate.fromJson(decoded);
+        if (!existingIds.contains(template.id)) {
+          WorkoutTemplateDatabase.templates.insert(0, template);
+          existingIds.add(template.id);
+          inserted = true;
+        }
+      } catch (_) {
+        // Ignore malformed entries and continue loading valid templates.
+      }
+    }
+
+    if (inserted && mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _persistCustomTemplates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final customTemplates = WorkoutTemplateDatabase.templates
+        .where((template) => template.isCustom)
+        .map((template) => jsonEncode(template.toJson()))
+        .toList();
+    await prefs.setStringList(_customTemplatesStorageKey, customTemplates);
+  }
+
+  void _showCustomTemplateActions(WorkoutTemplate template) {
+    showModalBottomSheet(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Rename Template'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _renameTemplate(template);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_outlined),
+              title: const Text('Duplicate Template'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _duplicateTemplate(template);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('Delete Template'),
+              textColor: Colors.red,
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _deleteTemplate(template);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _renameTemplate(WorkoutTemplate template) async {
+    final nameController = TextEditingController(text: template.name);
+    final descriptionController = TextEditingController(
+      text: template.description,
+    );
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename Template'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(labelText: 'Template Name'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: descriptionController,
+              minLines: 2,
+              maxLines: 3,
+              decoration: const InputDecoration(labelText: 'Description'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final name = nameController.text.trim();
+              final description = descriptionController.text.trim();
+              if (name.isEmpty || description.isEmpty) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(
+                    content: Text('Name and description cannot be empty.'),
+                  ),
+                );
+                return;
+              }
+
+              final index = WorkoutTemplateDatabase.templates.indexWhere(
+                (item) => item.id == template.id,
+              );
+              if (index != -1) {
+                WorkoutTemplateDatabase.templates[index] = template.copyWith(
+                  name: name,
+                  description: description,
+                );
+              }
+              Navigator.pop(dialogContext, true);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    nameController.dispose();
+    descriptionController.dispose();
+
+    if (result == true && mounted) {
+      await _persistCustomTemplates();
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Template updated.')),
+      );
+    }
+  }
+
+  Future<void> _deleteTemplate(WorkoutTemplate template) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete Template'),
+        content: Text('Delete "${template.name}"? This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    WorkoutTemplateDatabase.templates.removeWhere(
+      (item) => item.id == template.id,
+    );
+    await _persistCustomTemplates();
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Template deleted.')));
+  }
+
+  Future<void> _duplicateTemplate(WorkoutTemplate template) async {
+    final now = DateTime.now();
+    final duplicate = template.copyWith(
+      id: 'custom_${now.millisecondsSinceEpoch}',
+      name: '${template.name} Copy',
+      createdAt: now,
+      isCustom: true,
+    );
+
+    WorkoutTemplateDatabase.templates.insert(0, duplicate);
+    await _persistCustomTemplates();
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Template duplicated.')));
   }
 }
 
@@ -617,28 +838,44 @@ class _TemplateBuilderScreenState extends State<_TemplateBuilderScreen> {
                 ),
               )
             else
-              ..._exercises.asMap().entries.map((entry) {
-                final index = entry.key;
-                final item = entry.value;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 8),
-                  child: ListTile(
-                    title: Text(item.name),
-                    subtitle: Text(
-                      '${item.sets} sets • ${item.reps} reps • ${item.restSeconds}s rest'
-                      '${item.weight != null ? ' • ${item.weight}kg' : ''}',
+              ReorderableListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _exercises.length,
+                onReorder: _onReorderExercises,
+                itemBuilder: (context, index) {
+                  final item = _exercises[index];
+                  return Card(
+                    key: ValueKey('${item.name}_$index'),
+                    margin: const EdgeInsets.only(bottom: 8),
+                    child: ListTile(
+                      leading: const Icon(Icons.drag_indicator),
+                      title: Text(item.name),
+                      subtitle: Text(
+                        '${item.sets} sets • ${item.reps} reps • ${item.restSeconds}s rest'
+                        '${item.weight != null ? ' • ${item.weight}kg' : ''}',
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit_outlined),
+                            onPressed: () => _editExercise(index),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () {
+                              setState(() {
+                                _exercises.removeAt(index);
+                              });
+                            },
+                          ),
+                        ],
+                      ),
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () {
-                        setState(() {
-                          _exercises.removeAt(index);
-                        });
-                      },
-                    ),
-                  ),
-                );
-              }),
+                  );
+                },
+              ),
             const SizedBox(height: 20),
             SizedBox(
               width: double.infinity,
@@ -660,16 +897,47 @@ class _TemplateBuilderScreenState extends State<_TemplateBuilderScreen> {
   }
 
   Future<void> _addExercise() async {
-    final nameController = TextEditingController();
-    final setsController = TextEditingController(text: '3');
-    final repsController = TextEditingController(text: '10');
-    final restController = TextEditingController(text: '60');
+    await _showExerciseEditorDialog();
+  }
+
+  Future<void> _editExercise(int index) async {
+    final exercise = _exercises[index];
+    await _showExerciseEditorDialog(existingIndex: index, existing: exercise);
+  }
+
+  void _onReorderExercises(int oldIndex, int newIndex) {
+    setState(() {
+      if (newIndex > oldIndex) {
+        newIndex -= 1;
+      }
+      final item = _exercises.removeAt(oldIndex);
+      _exercises.insert(newIndex, item);
+    });
+  }
+
+  Future<void> _showExerciseEditorDialog({
+    int? existingIndex,
+    _EditableTemplateExercise? existing,
+  }) async {
+    final nameController = TextEditingController(text: existing?.name ?? '');
+    final setsController = TextEditingController(
+      text: (existing?.sets ?? 3).toString(),
+    );
+    final repsController = TextEditingController(
+      text: (existing?.reps ?? 10).toString(),
+    );
+    final restController = TextEditingController(
+      text: (existing?.restSeconds ?? 60).toString(),
+    );
     final weightController = TextEditingController();
+    if (existing?.weight != null) {
+      weightController.text = existing!.weight.toString();
+    }
 
     await showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Add Exercise'),
+        title: Text(existingIndex == null ? 'Add Exercise' : 'Edit Exercise'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -728,19 +996,22 @@ class _TemplateBuilderScreenState extends State<_TemplateBuilderScreen> {
               }
 
               setState(() {
-                _exercises.add(
-                  _EditableTemplateExercise(
-                    name: name,
-                    sets: sets,
-                    reps: reps,
-                    restSeconds: rest,
-                    weight: weight,
-                  ),
+                final updatedExercise = _EditableTemplateExercise(
+                  name: name,
+                  sets: sets,
+                  reps: reps,
+                  restSeconds: rest,
+                  weight: weight,
                 );
+                if (existingIndex == null) {
+                  _exercises.add(updatedExercise);
+                } else {
+                  _exercises[existingIndex] = updatedExercise;
+                }
               });
               Navigator.pop(dialogContext);
             },
-            child: const Text('Add'),
+            child: Text(existingIndex == null ? 'Add' : 'Save'),
           ),
         ],
       ),
@@ -1010,8 +1281,13 @@ class _FeaturedTemplateCard extends StatelessWidget {
 class _TemplateCard extends StatelessWidget {
   final WorkoutTemplate template;
   final VoidCallback onTap;
+  final VoidCallback? onManage;
 
-  const _TemplateCard({required this.template, required this.onTap});
+  const _TemplateCard({
+    required this.template,
+    required this.onTap,
+    this.onManage,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1078,7 +1354,14 @@ class _TemplateCard extends StatelessWidget {
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right, color: Colors.grey),
+              if (onManage != null)
+                IconButton(
+                  onPressed: onManage,
+                  icon: const Icon(Icons.more_vert),
+                  tooltip: 'Manage custom template',
+                )
+              else
+                const Icon(Icons.chevron_right, color: Colors.grey),
             ],
           ),
         ),

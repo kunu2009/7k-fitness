@@ -1,4 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/nutrition.dart';
 
 /// Barcode scan result
@@ -12,6 +16,20 @@ class BarcodeScanResult {
     required this.format,
     DateTime? scannedAt,
   }) : scannedAt = scannedAt ?? DateTime.now();
+
+  Map<String, dynamic> toJson() => {
+    'barcode': barcode,
+    'format': format,
+    'scannedAt': scannedAt.toIso8601String(),
+  };
+
+  factory BarcodeScanResult.fromJson(Map<String, dynamic> json) {
+    return BarcodeScanResult(
+      barcode: json['barcode'] as String? ?? '',
+      format: json['format'] as String? ?? 'Unknown',
+      scannedAt: DateTime.tryParse(json['scannedAt'] as String? ?? ''),
+    );
+  }
 
   @override
   String toString() => 'Barcode: $barcode (Format: $format)';
@@ -120,6 +138,8 @@ enum BarcodeLookupError {
 /// - Use mobile_scanner package for scanning
 /// - Use OpenFoodFacts API for product lookup
 class BarcodeService {
+  static const String _scanHistoryStorageKey = 'barcode_scan_history';
+
   static final BarcodeService _instance = BarcodeService._internal();
   factory BarcodeService() => _instance;
   BarcodeService._internal();
@@ -129,8 +149,35 @@ class BarcodeService {
 
   // Recently scanned barcodes
   final List<BarcodeScanResult> _scanHistory = [];
+  bool _isInitialized = false;
 
   List<BarcodeScanResult> get scanHistory => List.unmodifiable(_scanHistory);
+
+  Future<void> initialize() async {
+    if (_isInitialized) {
+      return;
+    }
+    _isInitialized = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    final rawHistory = prefs.getStringList(_scanHistoryStorageKey) ?? const [];
+    if (rawHistory.isEmpty) {
+      return;
+    }
+
+    _scanHistory
+      ..clear()
+      ..addAll(
+        rawHistory.map((item) {
+          try {
+            final decoded = jsonDecode(item) as Map<String, dynamic>;
+            return BarcodeScanResult.fromJson(decoded);
+          } catch (_) {
+            return BarcodeScanResult(barcode: '', format: 'Unknown');
+          }
+        }).where((scan) => scan.barcode.isNotEmpty),
+      );
+  }
 
   /// Lookup a product by barcode
   /// Uses OpenFoodFacts API (mock implementation)
@@ -176,11 +223,21 @@ class BarcodeService {
     if (_scanHistory.length > 50) {
       _scanHistory.removeLast();
     }
+    unawaited(_persistScanHistory());
   }
 
   /// Clear scan history
   void clearHistory() {
     _scanHistory.clear();
+    unawaited(_persistScanHistory());
+  }
+
+  Future<void> _persistScanHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = _scanHistory
+        .map((scan) => jsonEncode(scan.toJson()))
+        .toList();
+    await prefs.setStringList(_scanHistoryStorageKey, encoded);
   }
 
   /// Clear product cache
